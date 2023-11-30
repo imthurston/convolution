@@ -1,11 +1,21 @@
+#--------------------------------------------------------------------------------------------------------------------
+#Imports-------------------------------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------------------------
 import torch
 import MDAnalysis as mda
 from matplotlib import pyplot as plt
 import pandas as pd
 import numpy as np
 import torch
+from matplotlib.animation import FuncAnimation
 
+#--------------------------------------------------------------------------------------------------------------------
+#Class Definitions---------------------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------------------------
 class FrameConvolution:
+    #----------------------------------------------------------------------------------------------------------------
+    #Special methods-------------------------------------------------------------------------------------------------
+    #----------------------------------------------------------------------------------------------------------------
     def __init__(self,universe, frame_number):
         self.universe = universe
         self.frame_number = frame_number
@@ -16,8 +26,12 @@ class FrameConvolution:
             self.df = self.gen_frame_df()
         self.x_dim = self.universe.trajectory[0].dimensions[0]
         self.y_dim = self.universe.trajectory[0].dimensions[1]
-        self.z_dim = self.universe.trajectory[0].dimensions[2] 
+        self.z_dim = self.universe.trajectory[0].dimensions[2]
+        #self.animation_fig, self.animation_ax = plt.subplots()
         
+    #----------------------------------------------------------------------------------------------------------------
+    #Frame DF Generation---------------------------------------------------------------------------------------------
+    #----------------------------------------------------------------------------------------------------------------     
     def gen_frame_df(self):
         atom_radius_mapping = {'C': .914, 'H': .5, 'N': .92, "O": .73}
         data_dict = {'AtomID': [], "AtomName":[], 'AtomType': [], "ResType": [], "ResID": [], 'X': [], 'Y': [], 'Z': []}
@@ -39,6 +53,9 @@ class FrameConvolution:
         df.to_csv(csv_path,index=False)
         return df
         
+    #----------------------------------------------------------------------------------------------------------------
+    #General Helper Methods------------------------------------------------------------------------------------------
+    #----------------------------------------------------------------------------------------------------------------
     def get_dimension(self, travel_axis):
         if travel_axis == "X":
             travel_axis_dim = self.x_dim
@@ -57,12 +74,56 @@ class FrameConvolution:
         travel_axis_high = travel_axis_val+max_r
         filtered_df = self.df[(self.df[travel_axis] >= travel_axis_low) & (self.df[travel_axis] <= travel_axis_high)]
         return filtered_df
+
+    #----------------------------------------------------------------------------------------------------------------    
+    #Analysis Methods------------------------------------------------------------------------------------------------
+    #----------------------------------------------------------------------------------------------------------------
+    def create_conc_df(self, travel_axis = "Z", bins = 1000):
+        data_dict = {travel_axis: [], "NicConc":[], 'SolConc': [] }
+        travel_axis_dim = self.get_dimension(travel_axis) 
+        travel_axis_thickness = travel_axis_dim / bins #i.e, delta Z 
+        for i in range(bins):
+            travel_axis_val = i * travel_axis_thickness
+            #filtered_df = filter_df(d_travel,z)
+            vol_d = self.calc_conc(travel_axis, travel_axis_val, travel_axis_thickness)
+            nic_conc = vol_d["Nicotine"]/vol_d["Total"]
+            sol_conc = vol_d["Solvent"]/vol_d["Total"]
+            data_dict[travel_axis].append(travel_axis_val)
+            data_dict["NicConc"].append(nic_conc)
+            data_dict["SolConc"].append(sol_conc)
+        conc_df = pd.DataFrame(data_dict)
+        return conc_df    
     
+    def plot_caa_scatter(self,travel_axis = "Z", molecule_conc="NicConc", bins=1000):
+        df = self.create_autocorr_df(travel_axis, molecule_conc, bins)
+        df.plot(kind="scatter", x="d",y="c_aa")
+        return None
+        
+    def create_autocorr_df(self,travel_axis = "Z",molecule_conc = "NicConc", bins = 1000):
+        caa_d = {"d":[],"c_aa": []}
+        travel_axis_dim = self.get_dimension(travel_axis)
+        conc_df = self.create_conc_df(travel_axis, bins)
+        conc_tensor = torch.tensor(np.array(conc_df[molecule_conc]))
+        travel_midpoint = travel_axis_dim/2
+        for d in range(int(-1*travel_midpoint),int(travel_midpoint+1)):
+            #print(d)
+            c_aa =self.auto_corr(conc_tensor, travel_axis_dim, d)
+            caa_d["d"].append(d)
+            caa_d["c_aa"].append(c_aa)
+        return pd.DataFrame(caa_d)
+        
+    def plot_conc_scatter(self, travel_axis, molecule_conc="NicConc",bins=1000):
+        df = self.create_conc_df(travel_axis, bins)
+        df.plot(kind="scatter",x=travel_axis, y=molecule_conc)
+                
+    #Analysis Helper Methods-----------------------------------------------------------------------------------------
+    #----------------------------------------------------------------------------------------------------------------
     def calc_conc(self, travel_axis, travel_axis_val, travel_axis_thickness):
         # Initialize variables for total area and areas of each residue
         area_unk = 0
         area_sol = 0
-        #This makes a df that has all atoms to far away to project into the slice out. This is NOT self.df!!!
+        #This makes a df that has all atoms that are too far away to project into the slice filtered out. 
+        #This is NOT self.df!!!
         #Don't get confused.
         df = self.filter_df(travel_axis, travel_axis_val)
         # Iterate through each atom in the DataFrame
@@ -114,76 +175,6 @@ class FrameConvolution:
         #print(f"Area of SOL: {area_sol}")
         return vol_d
     
-    def plot_slice(df, z_slice,x_dim,y_dim):
-        fig, ax = plt.subplots()
-        # Initialize variables for total area and areas of each residue
-        total_area = 0
-        area_unk = 0
-        area_sol = 0
-        
-        # Iterate through each atom in the DataFrame
-        for index, atom in df.iterrows():
-            # Calculate the radius for the slice at Z
-            r_proj_squared = atom['Radius']**2 - (atom['Z'] - z_slice)**2
-            if r_proj_squared < 0:
-                #print("invalid projection")
-                continue
-            radius = np.sqrt(atom['Radius']**2 - (atom['Z'] - z_slice)**2)
-            
-            # Map different face colors based on Res
-            #face_color = 'r' if atom['ResType'] == 'UNK' else 'b'
-            if atom.AtomType == "C":
-                face_color = "k"
-            if atom.AtomType == "H":
-                face_color = "w"
-            if atom.AtomType == "O":
-                face_color = "r"
-            if atom.AtomType == "N":
-                face_color = "b"
-            
-            # Plot the circle with different face color for each ResID
-            circle = plt.Circle((atom['X'], atom['Y']), radius, edgecolor='k', facecolor=face_color, alpha=0.5)
-            ax.add_patch(circle)
-        
-            # Calculate the area of the circle using A = π * r^2
-            if radius > 0:
-                area = np.pi * radius**2
-                # Add the area to the corresponding residue
-                if atom['ResType'] == 'UNK':
-                    area_unk += area
-                elif atom['ResType'] == 'SOL':
-                    area_sol += area
-    
-        # Set plot limits
-        ax.set_xlim(0,x_dim)
-        ax.set_ylim(0,y_dim)
-        
-        # Set labels
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        
-        # Show the plot
-        plt.show()
-        
-    def create_conc_df(self, travel_axis, bins):
-        data_dict = {travel_axis: [], "NicConc":[], 'SolConc': [] }
-
-        travel_axis_dim = self.get_dimension(travel_axis)
-            
-        travel_axis_thickness = travel_axis_dim / bins #i.e, delta Z 
-        
-        for i in range(bins):
-            travel_axis_val = i * travel_axis_thickness
-            #filtered_df = filter_df(d_travel,z)
-            vol_d = self.calc_conc(travel_axis, travel_axis_val, travel_axis_thickness)
-            nic_conc = vol_d["Nicotine"]/vol_d["Total"]
-            sol_conc = vol_d["Solvent"]/vol_d["Total"]
-            data_dict[travel_axis].append(travel_axis_val)
-            data_dict["NicConc"].append(nic_conc)
-            data_dict["SolConc"].append(sol_conc)
-        conc_df = pd.DataFrame(data_dict)
-        return conc_df
-    
     def auto_corr(self, conc_tensor, travel_axis_dim, d):
         mean_conc = torch.mean(conc_tensor)
         #print(f"DEBUG: conc tensor: {conc_tensor}")
@@ -202,35 +193,111 @@ class FrameConvolution:
         delta_conc_zminusd = re_referenced_tensor - mean_conc
         c_aa = torch.dot(delta_conc_z, delta_conc_zminusd)
         return float(c_aa)
-
-    def plot_histogram(self,travel_axis, bins):
-        caa_d = {"d":[],"c_aa": []}
-        travel_axis_dim = self.get_dimension(travel_axis)
-        conc_df = self.create_conc_df(travel_axis, bins)
-        conc_tensor = torch.tensor(np.array(conc_df.NicConc))
-        travel_midpoint = travel_axis_dim/2
-        for d in range(int(-1*travel_midpoint),int(travel_midpoint+1)):
-            #print(d)
-            c_aa =self.auto_corr(conc_tensor, travel_axis_dim, d)
-            caa_d["d"].append(d)
-            caa_d["c_aa"].append(c_aa)
-        pd.DataFrame(caa_d).plot(kind="scatter", x="d",y="c_aa")
-        #return pd.DataFrame(caa_d)
-        return None
-
-    def create_autocorr_df(self,travel_axis,bins):
-        caa_d = {"d":[],"c_aa": []}
-        travel_axis_dim = self.get_dimension(travel_axis)
-        conc_df = self.create_conc_df(travel_axis, bins)
-        conc_tensor = torch.tensor(np.array(conc_df.NicConc))
-        travel_midpoint = travel_axis_dim/2
-        for d in range(int(-1*travel_midpoint),int(travel_midpoint+1)):
-            #print(d)
-            c_aa =self.auto_corr(conc_tensor, travel_axis_dim, d)
-            caa_d["d"].append(d)
-            caa_d["c_aa"].append(c_aa)
-        return pd.DataFrame(caa_d)
         
+    #----------------------------------------------------------------------------------------------------------------    
+    #Visualization Methods-------------------------------------------------------------------------------------------
+    #----------------------------------------------------------------------------------------------------------------   
+    
+    #TODO Finish this such that I can actually make an animation
+    def create_animation(self, travel_axis, bins):
+        # Set up the animation
+        travel_axis_dim = self.get_dimension(travel_axis)
+        travel_axis_step = travel_axis_dim / bins  # i.e., delta Z
+
+        animation = FuncAnimation(
+            self.animation_fig,
+            self.update_animation,
+            fargs=(travel_axis, travel_axis_step),
+            frames=bins,
+            interval=100
+        )
+
+        # If you want to save the animation to a file, you can use the following line
+        # animation.save('slice_animation.gif', writer='imagemagick')
+
+        # Show the animation
+        plt.show()
+        
+    #Visualization Helper Methods------------------------------------------------------------------------------------
+    #----------------------------------------------------------------------------------------------------------------
+    def plot_slice(self, travel_axis, travel_axis_val):
+            fig, ax = plt.subplots()
+            # Initialize variables for total area and areas of each residue
+            total_area = 0
+            area_unk = 0
+            area_sol = 0
+
+            #define the orthoganal axes based off the travel axis
+            if travel_axis == "X":
+                orth_dim_1 = self.y_dim
+                orth_axis_1 = "Y"
+                orth_dim_2 = self.z_dim
+                orth_axis_2 = "Z"
+            if travel_axis == "Y":
+                orth_dim_1 = self.x_dim
+                orth_axis_1 = "X"
+                orth_dim_2 = self.z_dim
+                orth_axis_2 = "Z"
+            if travel_axis == "Z":
+                orth_dim_1 = self.x_dim
+                orth_axis_1 = "X"
+                orth_dim_2 = self.y_dim
+                orth_axis_2 = "Y"
+            
+            df = self.filter_df(travel_axis, travel_axis_val)
+            # Iterate through each atom in the DataFrame
+            for index, atom in df.iterrows():
+                # Calculate the radius for the slice at Z
+                r_proj_squared = atom['Radius']**2 - (atom[travel_axis] - travel_axis_val)**2
+                if r_proj_squared < 0:
+                    #print("invalid projection")
+                    continue
+                radius = np.sqrt(atom['Radius']**2 - (atom[travel_axis] - travel_axis_val)**2)
+                
+                # Map different face colors based on Res
+                #face_color = 'r' if atom['ResType'] == 'UNK' else 'b'
+                if atom.AtomType == "C":
+                    face_color = "k"
+                if atom.AtomType == "H":
+                    face_color = "w"
+                if atom.AtomType == "O":
+                    face_color = "r"
+                if atom.AtomType == "N":
+                    face_color = "b"
+                
+                # Plot the circle with different face color for each ResID
+                circle = plt.Circle((atom[orth_axis_1], atom[orth_axis_2]), radius, edgecolor='k', facecolor=face_color, alpha=0.5)
+                ax.add_patch(circle)
+            
+                # Calculate the area of the circle using A = π * r^2
+                if radius > 0:
+                    area = np.pi * radius**2
+                    # Add the area to the corresponding residue
+                    if atom['ResType'] == 'UNK':
+                        area_unk += area
+                    elif atom['ResType'] == 'SOL':
+                        area_sol += area
+        
+            # Set plot limits
+            ax.set_xlim(0,orth_dim_1)
+            ax.set_ylim(0,orth_dim_2)
+            
+            # Set labels
+            ax.set_xlabel(orth_axis_1)
+            ax.set_ylabel(orth_axis_2)
+            
+            # Show the plot
+            plt.show()
+    
+    def update_animation(self, frame, travel_axis, travel_axis_step):
+        plt.clf()  # Clear the previous frame
+        travel_axis_val = frame * travel_axis_step
+        circle = self.plot_slice(travel_axis, travel_axis_val)
+        self.animation_fig.canvas.draw()
+        
+#--------------------------------------------------------------------------------------------------------------------
+#Main (most likely not used)-----------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------------------------     
 def main():
     pass
 if __name__ == "__main__":
