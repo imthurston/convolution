@@ -9,47 +9,55 @@ import numpy as np
 import torch
 from matplotlib.animation import FuncAnimation
 import os
-
-
-
-
+import concurrent.futures
+from functools import partial
 #--------------------------------------------------------------------------------------------------------------------
 #Class Definitions---------------------------------------------------------------------------------------------------
 #--------------------------------------------------------------------------------------------------------------------
+def process_frame(frame, universe, travel_axis, molecule_conc, bins):
+    try:
+        frameConv = FrameConvolution(universe, frame)
+        df = frameConv.create_shifted_conc_df(travel_axis=travel_axis, molecule_conc=molecule_conc, bins=bins)
+        return df
+    except TypeError:
+        print(f"Error encountered. Skipping frame: {frame}")
+        return None
+
 class UniverseConvolution:
     def __init__(self, conf_path, traj_path):
-        self.universe = mda.Universe(conf_path,traj_path)
-        self.size = len(self.universe.trajectory) #number of frames
+        self.universe = mda.Universe(conf_path, traj_path)
+        self.size = len(self.universe.trajectory)  # number of frames
     
-    #Pass an integer for 'frame_end', otherwise use default 'False' to use all trajectories.
-    #This is a work around since self.size cannot be passed as a default argument
-    def create_ave_df(self,travel_axis="Z", molecule_conc="NicConc",bins=1000, frame_start=0, frame_end=False):
-        #chech to see if the user passed an argument 
-        if frame_end == False:
+    def create_ave_df(self, travel_axis="Z", molecule_conc="NicConc", bins=1000, frame_start=0, frame_end=False):
+        if frame_end is False:
             frame_end = self.size
+
         df_l = []
-        for frame in range(frame_start, frame_end):
-            try:
-                frameConv = FrameConvolution(self.universe, frame)
-                df = frameConv.create_shifted_conc_df(travel_axis=travel_axis, molecule_conc=molecule_conc, bins=bins)
-                df_l.append(df)
-            except TypeError:
-                print(f"Error encountered. Skipping frame: {frame}")
+
+        process_frame_partial = partial(process_frame, universe=self.universe, travel_axis=travel_axis, molecule_conc=molecule_conc, bins=bins)
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            results = list(executor.map(process_frame_partial, range(frame_start, frame_end)))
+
+        for result in results:
+            if result is not None:
+                df_l.append(result)
+
         concatenated_df = pd.concat(df_l, axis=0)
         grouped_df = concatenated_df.groupby(concatenated_df.index)
         average_df = grouped_df.mean()
         return average_df
-    def plot_ave_conc_scatter(self, travel_axis="Z", molecule_conc="NicConc",bins=1000, frame_start=0, frame_end=False):
-        if frame_end == False:
+
+    def plot_ave_conc_scatter(self, travel_axis="Z", molecule_conc="NicConc", bins=1000, frame_start=0, frame_end=False):
+        if frame_end is False:
             frame_end = self.size
+
         df = self.create_ave_df(travel_axis=travel_axis, molecule_conc=molecule_conc, bins=bins, frame_start=frame_start, frame_end=frame_end)
-        df.plot(kind="scatter", x=travel_axis,y=molecule_conc)
+        df.plot(kind="scatter", x=travel_axis, y=molecule_conc)
         return None
     
 class FrameConvolution:
-    #----------------------------------------------------------------------------------------------------------------
-    #Special methods-------------------------------------------------------------------------------------------------
-    #----------------------------------------------------------------------------------------------------------------
+    #***Special methods***-------------------------------------------------------------------------------------------
     def __init__(self,universe, frame_number):
         self.universe = universe
         self.frame_number = frame_number
@@ -66,10 +74,8 @@ class FrameConvolution:
         self.y_dim = self.universe.trajectory[0].dimensions[1]
         self.z_dim = self.universe.trajectory[0].dimensions[2]
         #self.animation_fig, self.animation_ax = plt.subplots()
-        
-    #----------------------------------------------------------------------------------------------------------------
-    #Frame DF Generation---------------------------------------------------------------------------------------------
-    #----------------------------------------------------------------------------------------------------------------     
+
+    #***Frame DF Generation***---------------------------------------------------------------------------------------
     def gen_frame_df(self):
         atom_radius_mapping = {'C': .914, 'H': .5, 'N': .92, "O": .73, "A":1 , "B":1 }
         data_dict = {'AtomID': [], "AtomName":[], 'AtomType': [], "ResType": [], "ResID": [], 'X': [], 'Y': [], 'Z': []}
@@ -87,13 +93,11 @@ class FrameConvolution:
         df = pd.DataFrame(data_dict)
         df['Radius'] = df['AtomType'].map(atom_radius_mapping)
         csv_path = f"frames/frame{str(self.frame_number)}.csv"
-        print(csv_path)
+        #print(csv_path)
         df.to_csv(csv_path,index=False)
         return df
         
-    #----------------------------------------------------------------------------------------------------------------
-    #General Helper Methods------------------------------------------------------------------------------------------
-    #----------------------------------------------------------------------------------------------------------------
+    #***General Helper Methods***------------------------------------------------------------------------------------
     def get_dimension(self, travel_axis):
         if travel_axis == "X":
             travel_axis_dim = self.x_dim
@@ -113,9 +117,7 @@ class FrameConvolution:
         filtered_df = self.df[(self.df[travel_axis] >= travel_axis_low) & (self.df[travel_axis] <= travel_axis_high)]
         return filtered_df
 
-    #----------------------------------------------------------------------------------------------------------------    
-    #Analysis Methods------------------------------------------------------------------------------------------------
-    #----------------------------------------------------------------------------------------------------------------
+    #***Analysis Methods***------------------------------------------------------------------------------------------
     def create_conc_df(self, travel_axis = "Z", bins = 1000):
         #Initialize the data dictionary to store the concentration with the residue concentrations
         data_dict = {travel_axis: []}
@@ -216,7 +218,7 @@ class FrameConvolution:
         conc_df = self.create_conc_df(travel_axis, bins)
         Xc_df = self.create_Xc_df(travel_axis, molecule_conc, bins)
         n_max = int(Xc_df[Xc_df.Xc == Xc_df.Xc.max()].n)
-        print(f"DEBUG n_max: {n_max}")
+        #print(f"DEBUG n_max: {n_max}")
         n_max = -n_max
         max_z = conc_df[travel_axis].max()
         conc_df["Z"] = conc_df["Z"].apply(lambda x: (x + n_max) % (max_z + 1))
@@ -228,8 +230,7 @@ class FrameConvolution:
         df.plot(kind="scatter", x=travel_axis,y=molecule_conc)
         return None
         
-    #Analysis Helper Methods-----------------------------------------------------------------------------------------
-    #----------------------------------------------------------------------------------------------------------------
+    #***Analysis Helper Methods***-----------------------------------------------------------------------------------
     def calc_conc(self, travel_axis, travel_axis_val, travel_axis_thickness):
         # Initialize variables for total area and areas of each residue
         area_d = {}
@@ -318,11 +319,8 @@ class FrameConvolution:
         shifted_tensor = pulse_tensor.roll(n)
         dot_prod = torch.dot(conc_tensor, shifted_tensor)
         return float(dot_prod)
-        
-    #----------------------------------------------------------------------------------------------------------------    
-    #Visualization Methods-------------------------------------------------------------------------------------------
-    #----------------------------------------------------------------------------------------------------------------   
-
+            
+    #***Visualization Methods***-------------------------------------------------------------------------------------
     #TODO Finish this such that I can actually make an animation
     def create_animation(self, travel_axis, bins):
         # Set up the animation
@@ -343,8 +341,7 @@ class FrameConvolution:
         # Show the animation
         plt.show()
         
-    #Visualization Helper Methods------------------------------------------------------------------------------------
-    #----------------------------------------------------------------------------------------------------------------
+    #***Visualization Helper Methods***------------------------------------------------------------------------------
     def plot_slice(self, travel_axis, travel_axis_val):
             fig, ax = plt.subplots()
             # Initialize variables for total area and areas of each residue
