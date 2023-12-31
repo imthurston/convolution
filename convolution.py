@@ -8,6 +8,10 @@ import pandas as pd
 import numpy as np
 import torch
 from matplotlib.animation import FuncAnimation
+import os
+
+
+
 
 #--------------------------------------------------------------------------------------------------------------------
 #Class Definitions---------------------------------------------------------------------------------------------------
@@ -15,15 +19,33 @@ from matplotlib.animation import FuncAnimation
 class UniverseConvolution:
     def __init__(self, conf_path, traj_path):
         self.universe = mda.Universe(conf_path,traj_path)
+        self.size = len(self.universe.trajectory) #number of frames
     
-    def create_shifted_conc_df(self):
-        pass
+    #Pass an integer for 'frame_end', otherwise use default 'False' to use all trajectories.
+    #This is a work around since self.size cannot be passed as a default argument
+    def create_ave_df(self,travel_axis="Z", molecule_conc="NicConc",bins=1000, frame_start=0, frame_end=False):
+        #chech to see if the user passed an argument 
+        if frame_end == False:
+            frame_end = self.size
+        df_l = []
+        for frame in range(frame_start, frame_end):
+            try:
+                frameConv = FrameConvolution(self.universe, frame)
+                df = frameConv.create_shifted_conc_df(travel_axis=travel_axis, molecule_conc=molecule_conc, bins=bins)
+                df_l.append(df)
+            except TypeError:
+                print(f"Error encountered. Skipping frame: {frame}")
+        concatenated_df = pd.concat(df_l, axis=0)
+        grouped_df = concatenated_df.groupby(concatenated_df.index)
+        average_df = grouped_df.mean()
+        return average_df
+    def plot_ave_conc_scatter(self, travel_axis="Z", molecule_conc="NicConc",bins=1000, frame_start=0, frame_end=False):
+        if frame_end == False:
+            frame_end = self.size
+        df = self.create_ave_df(travel_axis=travel_axis, molecule_conc=molecule_conc, bins=bins, frame_start=frame_start, frame_end=frame_end)
+        df.plot(kind="scatter", x=travel_axis,y=molecule_conc)
+        return None
     
-
-
-
-
-
 class FrameConvolution:
     #----------------------------------------------------------------------------------------------------------------
     #Special methods-------------------------------------------------------------------------------------------------
@@ -31,7 +53,10 @@ class FrameConvolution:
     def __init__(self,universe, frame_number):
         self.universe = universe
         self.frame_number = frame_number
-        csv_path = f"frame{str(self.frame_number)}.csv"
+        folder_name = "frames"
+        if not os.path.exists(folder_name):
+            os.makedirs(folder_name)
+        csv_path = f"frames/frame{str(self.frame_number)}.csv"
         try:
             self.df = pd.read_csv(csv_path, index_col=False)
         except FileNotFoundError:
@@ -61,7 +86,7 @@ class FrameConvolution:
             data_dict['Z'].append(self.universe.trajectory[self.frame_number][j][2])
         df = pd.DataFrame(data_dict)
         df['Radius'] = df['AtomType'].map(atom_radius_mapping)
-        csv_path = f"frame{str(self.frame_number)}.csv"
+        csv_path = f"frames/frame{str(self.frame_number)}.csv"
         print(csv_path)
         df.to_csv(csv_path,index=False)
         return df
@@ -197,9 +222,6 @@ class FrameConvolution:
         conc_df["Z"] = conc_df["Z"].apply(lambda x: (x + n_max) % (max_z + 1))
 
         return conc_df    
-    
-    
-    
     
     def plot_shifted_conc_scatter(self, travel_axis="Z", molecule_conc="NicConc",bins=1000):
         df = self.create_shifted_conc_df(travel_axis, molecule_conc, bins)
